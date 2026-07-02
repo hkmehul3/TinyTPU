@@ -1,0 +1,26 @@
+{
+  "DESIGN_NAME": "top",
+  "VERILOG_FILES": [
+    "dir::../../rtl/mac.v",
+    "dir::../../rtl/pe.v",
+    "dir::../../rtl/systolic_array.v",
+    "dir::../../rtl/input_buffer.v",
+    "dir::../../rtl/output_buffer.v",
+    "dir::../../rtl/sram_controller.v",
+    "dir::../../rtl/dma.v",
+    "dir::../../rtl/axi_lite_slave.v",
+    "dir::../../rtl/controller.v",
+    "dir::../../rtl/top.v"
+  ],
+  "CLOCK_PORT": "clk",
+  "CLOCK_PERIOD": 10,
+  "FP_SIZING": "absolute",
+  "DIE_AREA": "0 0 1500 1500",
+  "PL_TARGET_DENSITY": 0.45,
+  "SYNTH_STRATEGY": "AREA 0",
+  "RUN_CTS": true,
+  "PL_RESIZER_TIMING_OPTIMIZATIONS": true,
+  "DIODE_INSERTION_STRATEGY": 4,
+  "FILL_INSERTION": true,
+  "TAP_DECAP_INSERTION": true
+}
