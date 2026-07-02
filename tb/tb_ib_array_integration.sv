@@ -1,0 +1,156 @@
+// =============================================================
+// Testbench: tb_ib_array_integration
+// Chains input_buffer -> systolic_array and re-runs the SAME
+// matmul test as tb_array.sv (same W, same x), but this time the
+// skewed activation feed comes from the real input_buffer module
+// instead of being hand-crafted in the testbench. If this passes,
+// Phase 1 and Phase 2 genuinely compose correctly end-to-end.
+// =============================================================
+
+`timescale 1ns/1ps
+
+module tb_ib_array_integration;
+
+    localparam DATA_WIDTH = 8;
+    localparam ACC_WIDTH  = 32;
+    localparam ROWS = 8;
+    localparam COLS = 8;
+    localparam MAX_COLS = 16;
+    localparam COL_ADDR_W = 5;
+    localparam WINDOW = 40;
+
+    reg clk, rst;
+    reg wr_en;
+    reg [2:0] wr_row;
+    reg [COL_ADDR_W-1:0] wr_col;
+    reg signed [DATA_WIDTH-1:0] wr_data;
+    reg start;
+    reg [COL_ADDR_W-1:0] num_cols;
+    wire ib_busy, ib_done;
+    wire signed [ROWS*DATA_WIDTH-1:0] a_link_flat;
+
+    reg en_array, load_weight;
+    reg signed [ROWS*COLS*DATA_WIDTH-1:0] w_in_flat;
+    wire signed [ROWS*DATA_WIDTH-1:0] a_out_flat_unused;
+    reg signed [COLS*ACC_WIDTH-1:0] sum_in_flat;
+    wire signed [COLS*ACC_WIDTH-1:0] sum_out_flat;
+
+    integer i, j, cyc;
+    integer errors = 0;
+
+    reg signed [DATA_WIDTH-1:0] W [0:ROWS-1][0:COLS-1];
+    reg signed [DATA_WIDTH-1:0] X [0:ROWS-1];
+    reg signed [ACC_WIDTH-1:0]  golden [0:COLS-1];
+    reg signed [ACC_WIDTH-1:0]  capture [0:WINDOW-1][0:COLS-1];
+    integer found_cycle [0:COLS-1];
+
+    input_buffer #(.DATA_WIDTH(DATA_WIDTH), .ROWS(ROWS), .MAX_COLS(MAX_COLS), .COL_ADDR_W(COL_ADDR_W)) ib (
+        .clk(clk), .rst(rst),
+        .wr_en(wr_en), .wr_row(wr_row), .wr_col(wr_col), .wr_data(wr_data),
+        .start(start), .num_cols(num_cols),
+        .busy(ib_busy), .done(ib_done),
+        .a_out_flat(a_link_flat)
+    );
+
+    systolic_array #(.DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH), .ROWS(ROWS), .COLS(COLS)) arr (
+        .clk(clk), .rst(rst), .en(en_array),
+        .load_weight(load_weight), .w_in_flat(w_in_flat),
+        .a_in_flat(a_link_flat), .a_out_flat(a_out_flat_unused),
+        .sum_in_flat(sum_in_flat), .sum_out_flat(sum_out_flat)
+    );
+
+    always #5 clk = ~clk;
+
+    initial begin
+        $dumpfile("tb_ib_array_integration.vcd");
+        $dumpvars(0, tb_ib_array_integration);
+
+        clk = 0; rst = 1; wr_en = 0; wr_row = 0; wr_col = 0; wr_data = 0;
+        start = 0; num_cols = 0;
+        en_array = 0; load_weight = 0; w_in_flat = 0; sum_in_flat = 0;
+        @(negedge clk); @(negedge clk);
+        rst = 0;
+
+        // Same W, X as tb_array.sv for a direct apples-to-apples check
+        for (i = 0; i < ROWS; i = i + 1)
+            for (j = 0; j < COLS; j = j + 1)
+                W[i][j] = ((i * COLS + j) % 7) - 3;
+
+        for (i = 0; i < ROWS; i = i + 1)
+            X[i] = i - 4;
+
+        for (j = 0; j < COLS; j = j + 1) begin
+            golden[j] = 0;
+            for (i = 0; i < ROWS; i = i + 1)
+                golden[j] = golden[j] + W[i][j] * X[i];
+        end
+
+        $display("Golden expected outputs (same as tb_array.sv):");
+        for (j = 0; j < COLS; j = j + 1)
+            $display("  y[%0d] = %0d", j, golden[j]);
+
+        // Load weights into the array
+        for (i = 0; i < ROWS; i = i + 1)
+            for (j = 0; j < COLS; j = j + 1)
+                w_in_flat[((i*COLS+j)+1)*DATA_WIDTH-1 -: DATA_WIDTH] = W[i][j];
+        load_weight = 1; en_array = 1;
+        @(negedge clk);
+        load_weight = 0;
+
+        // Load X into the input buffer as a single-column (num_cols=1) matrix:
+        // row r holds X[r] at column 0.
+        for (i = 0; i < ROWS; i = i + 1) begin
+            wr_en = 1; wr_row = i[2:0]; wr_col = 0; wr_data = X[i];
+            @(negedge clk);
+        end
+        wr_en = 0;
+
+        // Kick off streaming
+        num_cols = 1;
+        start = 1;
+        @(negedge clk);
+        start = 0;
+
+        // Capture sum_out_flat over a window
+        for (cyc = 0; cyc < WINDOW; cyc = cyc + 1) begin
+            @(negedge clk);
+            for (j = 0; j < COLS; j = j + 1)
+                capture[cyc][j] = sum_out_flat[(j+1)*ACC_WIDTH-1 -: ACC_WIDTH];
+        end
+
+        // Search for golden values, same methodology as tb_array.sv
+        $display("----------------------------------------");
+        for (j = 0; j < COLS; j = j + 1) begin
+            found_cycle[j] = -1;
+            for (cyc = 0; cyc < WINDOW; cyc = cyc + 1) begin
+                if (capture[cyc][j] === golden[j] && found_cycle[j] == -1)
+                    found_cycle[j] = cyc;
+            end
+            if (found_cycle[j] == -1) begin
+                $display("[FAIL] Column %0d: golden value %0d never appeared", j, golden[j]);
+                errors = errors + 1;
+            end else begin
+                $display("[PASS] Column %0d: golden value %0d found at cycle %0d", j, golden[j], found_cycle[j]);
+            end
+        end
+
+        for (j = 0; j < COLS-1; j = j + 1) begin
+            if (found_cycle[j] != -1 && found_cycle[j+1] != -1) begin
+                if (found_cycle[j+1] - found_cycle[j] !== 1) begin
+                    $display("[FAIL] Latency skew broken between col %0d and col %0d", j, j+1);
+                    errors = errors + 1;
+                end
+            end
+        end
+
+        $display("----------------------------------------");
+        if (errors == 0)
+            $display("INTEGRATION TEST: ALL CHECKS PASSED (input_buffer -> systolic_array)");
+        else
+            $display("INTEGRATION TEST: %0d CHECK(S) FAILED", errors);
+        $display("----------------------------------------");
+
+        $finish;
+    end
+
+endmodule
